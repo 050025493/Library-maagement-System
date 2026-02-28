@@ -1,161 +1,166 @@
-import { useState } from 'react';
+// src/pages/search.tsx
+import { useState, useRef, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { 
-   BookOpen 
-} from 'lucide-react';
+import { Search, BookOpen, Cpu, FlaskConical, Building2, Calculator, Leaf, Layers } from 'lucide-react';
 
-// 1. Added the fields list
-const SEARCH_FIELDS = [
-  'Keyword', 'Subject', 'Title', 'Author', 'Publisher', 
-  'Publisher Location', 'ISBN', 'Barcode'
+// Quick-access subject chips
+const SUBJECTS = [
+  { label: 'Computer Science', icon: Cpu,          color: 'bg-blue-50 text-blue-700 border-blue-200    hover:bg-blue-100' },
+  { label: 'Management',       icon: Building2,     color: 'bg-amber-50 text-amber-700 border-amber-200 hover:bg-amber-100' },
+  { label: 'Electronics',      icon: Layers,        color: 'bg-violet-50 text-violet-700 border-violet-200 hover:bg-violet-100' },
+  { label: 'Mechanical',       icon: Cpu,           color: 'bg-orange-50 text-orange-700 border-orange-200 hover:bg-orange-100' },
+  { label: 'Mathematics',      icon: Calculator,    color: 'bg-green-50 text-green-700 border-green-200  hover:bg-green-100' },
+  { label: 'Biotechnology',    icon: FlaskConical,  color: 'bg-teal-50 text-teal-700 border-teal-200    hover:bg-teal-100' },
+  { label: 'Civil',            icon: Building2,     color: 'bg-stone-50 text-stone-700 border-stone-200  hover:bg-stone-100' },
+  { label: 'General',         icon: Leaf,           color: 'bg-lime-50 text-lime-700 border-lime-200    hover:bg-lime-100' },
 ];
 
-export default function SearchPage() {
-  const navigate = useNavigate();
-  const [keyword, setKeyword] = useState('');
-  
-  // 2. Added state for the dropdown
-  const [searchField, setSearchField] = useState('Keyword'); 
-  
-  // State to track your custom checkboxes
-  const [filters, setFilters] = useState({
-    books: false,
-    journals: false,
-    digitalResources: false
-  });
+const SEARCH_FIELDS = ['Keyword', 'Title', 'Author', 'Publisher', 'Subject', 'ISBN'];
 
-  const handleFilterChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setFilters({ ...filters, [e.target.name]: e.target.checked });
+export default function SearchPage() {
+  const [query,       setQuery]       = useState('');
+  const [field,       setField]       = useState('Keyword');
+  const [focused,     setFocused]     = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const navigate = useNavigate();
+
+  // Focus input on mount
+  useEffect(() => { inputRef.current?.focus(); }, []);
+
+  const handleSearch = () => {
+    const q = query.trim();
+    if (!q) return;
+    navigate(`/results?q=${encodeURIComponent(q)}&field=${encodeURIComponent(field)}`);
   };
 
-  const handleSearch = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!keyword.trim() && !Object.values(filters).some(Boolean)) return;
-    
-    // Build the URL parameters based on user input
-    const params = new URLSearchParams();
-    if (keyword.trim()) {
-      params.append('keyword', keyword.trim());
-      // 3. Append the selected field to the URL
-      params.append('field', searchField); 
-    }
-    
-    // Grab all checked filters and join them (e.g., types=books,journals)
-    const activeFilters = Object.entries(filters)
-      .filter(([_, isChecked]) => isChecked)
-      .map(([key]) => key)
-      .join(',');
-      
-    if (activeFilters) params.append('types', activeFilters);
+  const handleSubjectClick = (subject: string) => {
+    navigate(`/results?q=${encodeURIComponent(subject)}&field=Subject`);
+  };
 
-    // Navigate to results page with the new URL parameters
-    navigate(`/results?${params.toString()}`);
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') handleSearch();
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col">
-      {/* Header */}
-      <header className=" flex  p-4 gap-3  items-center border-b border-slate-200/80 bg-white/90 backdrop-blur">
-         
-          <div className="w-8 h-8 bg-blue-600 rounded-md flex items-center justify-center">
-            <BookOpen className="text-white" size={18} />
-            
+    <div className="min-h-screen bg-[#f8f9fb] flex flex-col">
+
+      {/* ── Top bar ── */}
+      <header className="px-8 py-5 flex items-center justify-between">
+        <div className="flex items-center gap-2.5">
+          <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center shadow-sm">
+            <BookOpen className="text-white w-4 h-4" />
           </div>
-          <span className="font-bold text-lg hidden md:block">My Library</span>
-        
+          <span className="font-bold text-gray-800 text-base tracking-tight">VIT Library</span>
+        </div>
+        <div className="text-xs text-gray-400 hidden md:block">
+          271,000+ books · 105,000+ unique titles
+        </div>
       </header>
 
-      {/* Hero Section */}
-      <section className="flex-1 flex items-center justify-center px-6 py-12 md:py-16">
-        <div className="w-full max-w-4xl rounded-3xl border border-slate-200 bg-white p-8 shadow-sm md:p-12 hover:-translate-y-1 transition-transform duration-200 ease-out">         
-          
-          <div className="mb-10 text-center">
-            <h1 className="text-4xl md:text-5xl font-semibold text-slate-900 mb-4 tracking-tight">
-              Discover Global Knowledge
-            </h1>
-            <p className="text-base md:text-lg text-slate-600 max-w-2xl mx-auto leading-relaxed">
-              Search over 2 lakh books, journals and digital resources present in our university campus library.
-            </p>
-          </div>
+      {/* ── Hero ── */}
+      <main className="flex-1 flex flex-col items-center justify-center px-6 pb-24 pt-8">
 
-          <form id="searchform" onSubmit={handleSearch} className="space-y-6 max-w-3xl mx-auto">
-            
-            {/* Search Box */}
-            <div className="flex items-center bg-white rounded-2xl border border-slate-300 overflow-hidden focus-within:ring-2 focus-within:ring-slate-300 transition-all">
-              
-              {/* 4. INSERTED DROPDOWN HERE: Perfectly matches your slate theme */}
-              <select 
-                value={searchField}
-                onChange={(e) => setSearchField(e.target.value)}
-                className="bg-slate-50 border-r border-slate-300 text-slate-700 py-3.5 pl-5 pr-2 outline-none cursor-pointer hover:bg-slate-100 transition-colors font-medium h-full"
+        {/* Logo mark */}
+        <div
+          className="mb-8 relative"
+          style={{ animation: 'float 4s ease-in-out infinite' }}
+        >
+          <div className="w-20 h-20 bg-blue-600 rounded-3xl flex items-center justify-center shadow-xl shadow-blue-200">
+            <BookOpen className="text-white w-10 h-10" />
+          </div>
+          {/* Decorative ring */}
+          <div className="absolute -inset-2 rounded-[2rem] border-2 border-blue-200 border-dashed opacity-60" />
+        </div>
+
+        <h1 className="text-4xl md:text-5xl font-extrabold text-gray-900 tracking-tight text-center mb-3">
+          Find your next read
+        </h1>
+        <p className="text-gray-500 text-base md:text-lg text-center mb-10 max-w-md">
+          Search the VIT library catalog — books, theses, references, and more.
+        </p>
+
+        {/* ── Search bar ── */}
+        <div
+          className={`w-full max-w-2xl bg-white rounded-2xl shadow-lg border transition-all duration-200 ${
+            focused ? 'border-blue-400 shadow-blue-100 shadow-xl' : 'border-gray-200'
+          }`}
+        >
+          <div className="flex items-center gap-0">
+            {/* Field selector */}
+            <div className="pl-4 pr-1 flex-shrink-0">
+              <select
+                value={field}
+                onChange={(e) => setField(e.target.value)}
+                className="bg-transparent text-gray-500 text-sm py-4 outline-none cursor-pointer border-r border-gray-200 pr-3 appearance-none"
               >
-                {SEARCH_FIELDS.map(field => (
-                  <option key={field} value={field}>{field}</option>
+                {SEARCH_FIELDS.map((f) => (
+                  <option key={f} value={f}>{f}</option>
                 ))}
               </select>
+            </div>
 
-              <div className="pl-4 text-slate-400">
-                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" fill="currentColor" viewBox="0 0 16 16">
-                  <path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001q.044.06.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1 1 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0"/>
-                </svg>
-              </div>
+            {/* Search input */}
+            <div className="flex-1 flex items-center gap-2 px-3">
+              <Search className="w-4 h-4 text-gray-400 flex-shrink-0" />
               <input
+                ref={inputRef}
                 type="text"
-                id="searchInput"
-                value={keyword}
-                onChange={(e) => setKeyword(e.target.value)}
-                placeholder="Search by title, author or keyword"
-                className="flex-1 py-3.5 px-4 text-base outline-none bg-transparent text-slate-800 placeholder-slate-400"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={handleKeyDown}
+                onFocus={() => setFocused(true)}
+                onBlur={() => setFocused(false)}
+                placeholder="Search by keyword, title, author..."
+                className="flex-1 py-4 text-gray-900 placeholder-gray-400 bg-transparent outline-none text-base"
               />
-              <button 
-                type="submit" 
-                className="bg-slate-900 hover:bg-slate-800  text-white font-medium py-3.5 px-8 h-full transition-colors cursor-pointer"
+            </div>
+
+            {/* Search button */}
+            <div className="pr-2 py-2 flex-shrink-0">
+              <button
+                onClick={handleSearch}
+                disabled={!query.trim()}
+                className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-200 disabled:text-gray-400 text-white font-semibold px-6 py-2.5 rounded-xl transition-all duration-150 text-sm flex items-center gap-2 disabled:cursor-not-allowed"
               >
-                Search
+                <Search className="w-4 h-4" />
+                <span className="hidden sm:inline">Search</span>
               </button>
             </div>
-
-            {/* Filters */}
-            <div className="flex flex-wrap items-center justify-center gap-x-5 gap-y-3 pt-1">
-              <span className="font-medium text-slate-600">Filter by:</span>
-              
-              <label className="flex items-center gap-2 cursor-pointer text-slate-600 hover:text-slate-900 transition-colors">
-                <input 
-                  type="checkbox" 
-                  name="books"
-                  checked={filters.books}
-                  onChange={handleFilterChange}
-                  className="w-4 h-4 text-slate-900 rounded border-slate-300 focus:ring-slate-400 cursor-pointer" 
-                />
-                Books
-              </label>
-              
-              <label className="flex items-center gap-2 cursor-pointer text-slate-600 hover:text-slate-900 transition-colors">
-                <input 
-                  type="checkbox" 
-                  name="journals"
-                  checked={filters.journals}
-                  onChange={handleFilterChange}
-                  className="w-4 h-4 text-slate-900 rounded border-slate-300 focus:ring-slate-400 cursor-pointer" 
-                />
-                Journals
-              </label>
-              
-              <label className="flex items-center gap-2 cursor-pointer text-slate-600 hover:text-slate-900 transition-colors">
-                <input 
-                  type="checkbox" 
-                  name="digitalResources"
-                  checked={filters.digitalResources}
-                  onChange={handleFilterChange}
-                  className="w-4 h-4 text-slate-900 rounded border-slate-300 focus:ring-slate-400 cursor-pointer" 
-                />
-                Digital Resources
-              </label>
-            </div>
-
-          </form>
+          </div>
         </div>
-      </section>
+
+        {/* ── Subject quick-access ── */}
+        <div className="mt-10 w-full max-w-2xl">
+          <p className="text-xs font-semibold text-gray-400 uppercase tracking-widest text-center mb-4">
+            Browse by Subject
+          </p>
+          <div className="flex flex-wrap gap-2.5 justify-center">
+            {SUBJECTS.map(({ label, icon: Icon, color }) => (
+              <button
+                key={label}
+                onClick={() => handleSubjectClick(label)}
+                className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl border text-sm font-medium transition-all duration-150 ${color}`}
+              >
+                <Icon className="w-3.5 h-3.5" />
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </main>
+
+      {/* ── Footer ── */}
+      <footer className="text-center text-xs text-gray-400 pb-8">
+        VIT Library Catalog · Vellore Institute of Technology
+      </footer>
+
+      {/* Float animation */}
+      <style>{`
+        @keyframes float {
+          0%, 100% { transform: translateY(0px); }
+          50%       { transform: translateY(-8px); }
+        }
+      `}</style>
     </div>
   );
 }
