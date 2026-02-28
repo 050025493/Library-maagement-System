@@ -1,10 +1,55 @@
-// src/hooks/useBooks.ts
-import { useState, useEffect, useCallback } from 'react';
-import { supabase } from '../lib/supabaseClient';
-import { groupBooksByTitle, parseShelf } from '../utils/shelfUtils';
-import type { BookRow, BookGroup, FilterState, Facets } from '../types/book';
+// src/hooks/useBooks.ts  ── Typesense-powered, Google-tier search
+import { useState, useEffect, useCallback, useRef } from "react";
+import { typesenseClient, BOOKS_COLLECTION } from "../lib/typesenseClient";
+import { supabase } from "../lib/supabaseClient";
+import { groupBooksByTitle } from "../utils/shelfUtils";
+import type { BookRow, BookGroup, FilterState, Facets } from "../types/book";
 
-const PAGE_SIZE = 50;
+// ─── Types returned by Typesense ─────────────────────────────────────────────
+interface TSDocument {
+  id: string;
+  title: string;
+  subtitle?: string;
+  author?: string;
+  publisher?: string;
+  pub_year?: number;
+  subject?: string;
+  isbn?: string;
+  item_types?: string[];
+  status: string;
+  available_copies: number;
+  copy_count: number;
+  total_checkouts: number;
+  shelf?: string;
+  call_number?: string;
+  floor?: string;
+  rack?: number;
+  col?: number;
+  edition?: string;
+  row_ids?: string[];
+}
+
+interface TSHit {
+  document: TSDocument;
+  highlight?: Record<string, { snippet?: string; snippets?: string[] }>;
+  text_match?: number;
+}
+
+interface TSFacetCount {
+  field_name: string;
+  counts: Array<{ value: string; count: number }>;
+}
+
+interface TSSearchResult {
+  hits?: TSHit[];
+  found: number;
+  facet_counts?: TSFacetCount[];
+  page: number;
+  request_params: { per_page: number };
+}
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+const PAGE_SIZE = 25;
 
 const DEFAULT_FILTERS: FilterState = {
   availableOnly: false,
@@ -17,195 +62,258 @@ const DEFAULT_FILTERS: FilterState = {
   cols:          [],
 };
 
-// ─── Score a book group by how well it matches the search tokens ─────────────
-// Higher score = closer match. Used to sort results by relevance.
-const scoreGroup = (group: BookGroup, tokens: string[]): number => {
-  if (!tokens.length) return 0;
-  const fields = [
-    (group.title    ?? '').toLowerCase(),
-    (group.author   ?? '').toLowerCase(),
-    (group.subject  ?? '').toLowerCase(),
-    (group.publisher ?? '').toLowerCase(),
-  ];
-  let score = 0;
-  for (const token of tokens) {
-    for (const field of fields) {
-      if (field.includes(token)) {
-        // Exact word boundary match scores highest
-        score += field === token ? 10 : field.startsWith(token) ? 5 : 2;
-      }
-    }
-  }
-  return score;
-};
-
-// ─── Build Supabase OR filter for a set of tokens across fields ──────────────
-const buildTokenFilter = (tokens: string[], fields: string[]) => {
+// ─── Build Typesense filter_by string ────────────────────────────────────────
+function buildFilterBy(filters: FilterState, fieldMap: Record<string, string>): string {
   const parts: string[] = [];
-  for (const token of tokens) {
-    for (const field of fields) {
-      parts.push(`${field}.ilike.%${token}%`);
-    }
-  }
-  return parts.join(',');
-};
 
-export function useBooks(initialQuery = '', initialField = 'Keyword') {
+  if (filters.availableOnly) {
+    parts.push("status:=Available");
+  }
+  if (filters.subjects.length > 0) {
+    parts.push(`subject:[${filters.subjects.map((s) => `\`${s}\``).join(",")}]`);
+  }
+  if (filters.itemTypes.length > 0) {
+    parts.push(`item_types:[${filters.itemTypes.map((t) => `\`${t}\``).join(",")}]`);
+  }
+  if (filters.authors.length > 0) {
+    parts.push(`author:[${filters.authors.map((a) => `\`${a}\``).join(",")}]`);
+  }
+  if (filters.publishers.length > 0) {
+    parts.push(`publisher:[${filters.publishers.map((p) => `\`${p}\``).join(",")}]`);
+  }
+  if (filters.floors.length > 0) {
+    parts.push(`floor:[${filters.floors.map((f) => `\`${f}\``).join(",")}]`);
+  }
+  if (filters.racks.length > 0) {
+    parts.push(`rack:[${filters.racks.join(",")}]`);
+  }
+  if (filters.cols.length > 0) {
+    parts.push(`col:[${filters.cols.join(",")}]`);
+  }
+
+  // Unused but kept for future dynamic filter_by extensions
+  void fieldMap;
+
+  return parts.join(" && ");
+}
+
+// ─── Parse web-search syntax ─────────────────────────────────────────────────
+// Supports:
+//   "exact phrase"  → pass through to Typesense as-is (it understands quotes)
+//   -word           → Typesense supports negation natively with `-`
+//   normal words    → typo-tolerant match
+function sanitizeQuery(raw: string): string {
+  // Typesense's search query syntax already supports "" and -word, so just
+  // trim and pass through. We do strip stray backticks to avoid injection.
+  return raw.replace(/`/g, "").trim();
+}
+
+// ─── Convert Typesense hit → lightweight BookGroup ───────────────────────────
+// Full copy details are fetched lazily when a book is clicked.
+function hitToBookGroup(hit: TSHit): BookGroup {
+  const d = hit.document;
+  return {
+    title:           d.title,
+    subtitle:        d.subtitle ?? null,
+    author:          d.author ?? null,
+    publisher:       d.publisher ?? null,
+    pub_year:        d.pub_year?.toString() ?? null,
+    subject:         d.subject ?? null,
+    edition:         d.edition ?? null,
+    shelf:           d.shelf ?? null,
+    call_number:     d.call_number ?? null,
+    status:          (d.status as BookGroup["status"]) ?? "Not Available",
+    totalCopies:     d.copy_count,
+    availableCopies: d.available_copies,
+    // Lazy — filled when the user clicks a book
+    variants:        [],
+    // Store row_ids so we can load variants on demand
+    _rowIds:         d.row_ids ?? [],
+  } as BookGroup & { _rowIds: string[] };
+}
+
+// ─── Hook ─────────────────────────────────────────────────────────────────────
+export function useBooks(initialQuery = "", initialField = "Keyword") {
   const [searchTerm,      setSearchTerm]  = useState(initialQuery);
   const [searchField,     setSearchField] = useState(initialField);
   const [debouncedSearch, setDebounced]   = useState(initialQuery);
   const [page,            setPage]        = useState(1);
-  const [allGroups,       setAllGroups]   = useState<BookGroup[]>([]);
+
+  const [groups,          setGroups]      = useState<BookGroup[]>([]);
+  const [totalResults,    setTotalResults] = useState(0);
   const [loading,         setLoading]     = useState(false);
   const [error,           setError]       = useState<string | null>(null);
   const [filters,         setFilters]     = useState<FilterState>(DEFAULT_FILTERS);
+  const [facets,          setFacets]      = useState<Facets>({
+    subjects: [], authors: [], publishers: [], itemTypes: [],
+    floors: [], racks: [], cols: [],
+  });
 
-  // ─── Debounce ─────────────────────────────────────────────────────────────
+  // ─── Debounce ───────────────────────────────────────────────────────────
   useEffect(() => {
-    const t = setTimeout(() => setDebounced(searchTerm), 400);
+    const t = setTimeout(() => setDebounced(searchTerm), 300);
     return () => clearTimeout(t);
   }, [searchTerm]);
 
-  useEffect(() => { setPage(1); }, [debouncedSearch, searchField]);
+  // Reset page on new search
+  useEffect(() => { setPage(1); }, [debouncedSearch, searchField, filters]);
 
-  // ─── Smart fetch ─────────────────────────────────────────────────────────
-  const fetchBooks = useCallback(async () => {
+  // ─── Typesense search ───────────────────────────────────────────────────
+  const search = useCallback(async () => {
+    const rawQ = debouncedSearch.trim();
+    if (!rawQ) {
+      setGroups([]);
+      setTotalResults(0);
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     setError(null);
 
     try {
-      const rawQ = debouncedSearch.trim();
+      const q = sanitizeQuery(rawQ);
 
-      // No search — load nothing (empty state, not full catalog)
-      if (!rawQ) {
-        setAllGroups([]);
-        setLoading(false);
-        return;
-      }
-
-      // Tokenize: split on whitespace, remove empty, lowercase
-      const tokens = rawQ.toLowerCase().split(/\s+/).filter(Boolean);
-
-      // Decide which DB columns to search based on field selector
-      const fieldColumns: Record<string, string[]> = {
-        Keyword:   ['title', 'author', 'subject', 'publisher'],
-        Title:     ['title'],
-        Author:    ['author'],
-        Publisher: ['publisher'],
-        Subject:   ['subject'],
-        ISBN:      ['isbn'],
-        Barcode:   ['barcode'],
+      // Map UI field names → Typesense field names
+      const FIELD_MAP: Record<string, string> = {
+        Keyword:   "title,author,subject,publisher,subtitle",
+        Title:     "title",
+        Author:    "author",
+        Publisher: "publisher",
+        Subject:   "subject",
+        ISBN:      "isbn",
+        Barcode:   "isbn", // no barcode field in grouped index; fall back
       };
-      const cols = fieldColumns[searchField] ?? fieldColumns.Keyword;
+      const queryBy = FIELD_MAP[searchField] ?? FIELD_MAP.Keyword;
 
-      // ── Pass 1: search all tokens (any match) ────────────────────────────
-      let q = supabase.from('books').select('*');
+      // Per-field weights: title=4, author=3, subject=2, publisher=1
+      const WEIGHT_MAP: Record<string, string> = {
+        "title,author,subject,publisher,subtitle": "4,3,2,1,1",
+        title:     "4",
+        author:    "3",
+        publisher: "1",
+        subject:   "2",
+        isbn:      "1",
+      };
+      const queryByWeights = WEIGHT_MAP[queryBy] ?? undefined;
 
-      if (searchField === 'Barcode') {
-        q = q.eq('barcode', rawQ);
-      } else if (searchField === 'ISBN') {
-        q = q.ilike('isbn', `%${rawQ}%`);
-      } else {
-        // Multi-token OR query: any row that matches ANY token in ANY column
-        q = q.or(buildTokenFilter(tokens, cols));
+      const filterBy = buildFilterBy(filters, {});
+
+      const params: Record<string, unknown> = {
+        q,
+        query_by:         queryBy,
+        query_by_weights: queryByWeights,
+
+        // ── Typo tolerance ─────────────────────────────────────────────────
+        // Allow 1 typo for words ≥5 chars, 2 typos for ≥8 chars
+        num_typos:        "2",
+        typo_tokens_threshold: 1,
+
+        // ── Stemming ───────────────────────────────────────────────────────
+        // Typesense has built-in English stemming; enabled by default.
+        // Set enable_typos_for_alpha_numerical_tokens:false to avoid
+        // stemming ISBN/barcode fields.
+
+        // ── Prefix search ──────────────────────────────────────────────────
+        // Matches "comput" → "computer", "computing", etc.
+        prefix:           "true",
+
+        // ── Popularity boosting ────────────────────────────────────────────
+        // Blend text-match score with total_checkouts
+        sort_by:          `_text_match(buckets:10):desc,total_checkouts:desc`,
+
+        // ── Facets for filters ─────────────────────────────────────────────
+        facet_by:         "subject,author,publisher,item_types,status,floor,rack,col",
+        max_facet_values: 50,
+
+        // ── Pagination ─────────────────────────────────────────────────────
+        per_page: PAGE_SIZE,
+        page,
+
+        // ── Filter ─────────────────────────────────────────────────────────
+        ...(filterBy ? { filter_by: filterBy } : {}),
+
+        // ── Highlight ──────────────────────────────────────────────────────
+        highlight_full_fields: "title,author,subject",
+        snippet_threshold:      30,
+      };
+
+      const result = (await typesenseClient
+        .collections(BOOKS_COLLECTION)
+        .documents()
+        .search(params)) as TSSearchResult;
+
+      const hits  = result.hits ?? [];
+      const found = result.found ?? 0;
+
+      setGroups(hits.map(hitToBookGroup));
+      setTotalResults(found);
+
+      // ── Parse facets ─────────────────────────────────────────────────────
+      const facetMap: Record<string, string[]> = {};
+      const rackSet  = new Set<number>();
+      const colSet   = new Set<number>();
+
+      for (const fc of result.facet_counts ?? []) {
+        const values = fc.counts.map((c) => c.value);
+
+        if (fc.field_name === "rack") {
+          fc.counts.forEach((c) => rackSet.add(parseInt(c.value, 10)));
+        } else if (fc.field_name === "col") {
+          fc.counts.forEach((c) => colSet.add(parseInt(c.value, 10)));
+        } else {
+          facetMap[fc.field_name] = values;
+        }
       }
 
-      const { data: pass1, error: e1 } = await q
-        .order('title', { ascending: true })
-        .limit(5000);
-
-      if (e1) throw e1;
-
-      let rows: BookRow[] = pass1 ?? [];
-
-      // ── Pass 2: fuzzy fallback — if results are empty, try each token separately ──
-      // This handles typos by broadening the search (e.g. "javascrpt" → "javas")
-      if (rows.length === 0 && tokens.length > 0 && searchField !== 'Barcode') {
-        // Try progressively shorter prefixes of each token (min 3 chars)
-        const fuzzyParts: string[] = [];
-        for (const token of tokens) {
-          // Use first 60% of each token as a fuzzy prefix
-          const prefix = token.slice(0, Math.max(3, Math.floor(token.length * 0.6)));
-          for (const col of cols) {
-            fuzzyParts.push(`${col}.ilike.%${prefix}%`);
-          }
-        }
-        if (fuzzyParts.length > 0) {
-          const { data: pass2, error: e2 } = await supabase
-            .from('books')
-            .select('*')
-            .or(fuzzyParts.join(','))
-            .order('title', { ascending: true })
-            .limit(5000);
-          if (!e2) rows = pass2 ?? [];
-        }
-      }
-
-      // ── Group, score, sort by relevance ──────────────────────────────────
-      const grouped = groupBooksByTitle(rows);
-
-      // Sort by relevance score (highest first), keeping alphabetical as tiebreaker
-      const scored = grouped
-        .map((g) => ({ group: g, score: scoreGroup(g, tokens) }))
-        .sort((a, b) => b.score - a.score || a.group.title.localeCompare(b.group.title));
-
-      setAllGroups(scored.map((s) => s.group));
+      setFacets({
+        subjects:   facetMap.subject     ?? [],
+        authors:    facetMap.author      ?? [],
+        publishers: facetMap.publisher   ?? [],
+        itemTypes:  facetMap.item_types  ?? [],
+        floors:     facetMap.floor       ?? [],
+        racks:      [...rackSet].sort((a, b) => a - b),
+        cols:       [...colSet].sort((a, b) => a - b),
+      });
 
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Unknown error occurred');
+      setError(e instanceof Error ? e.message : "Search failed");
     } finally {
       setLoading(false);
     }
-  }, [debouncedSearch, searchField]);
+  }, [debouncedSearch, searchField, filters, page]);
 
-  useEffect(() => { void fetchBooks(); }, [fetchBooks]);
+  useEffect(() => { void search(); }, [search]);
 
-  // ─── Client-side filtering ────────────────────────────────────────────────
-  const filteredGroups = allGroups.filter((book) => {
-    if (filters.availableOnly && book.status !== 'Available') return false;
-    if (filters.subjects.length   > 0 && !filters.subjects.includes(book.subject ?? ''))   return false;
-    if (filters.authors.length    > 0 && !filters.authors.includes(book.author ?? ''))     return false;
-    if (filters.publishers.length > 0 && !filters.publishers.includes(book.publisher ?? '')) return false;
-    if (filters.itemTypes.length  > 0) {
-      if (!book.variants.some((v) => filters.itemTypes.includes(v.item_type ?? ''))) return false;
+  // ─── Lazy-load variants (physical copies) from Supabase ─────────────────
+  // Called only when the user clicks a book card
+  const variantCache = useRef<Record<string, BookRow[]>>({});
+
+  const loadVariants = useCallback(async (group: BookGroup): Promise<BookGroup> => {
+    const rowIds = (group as BookGroup & { _rowIds?: string[] })._rowIds;
+    if (!rowIds || rowIds.length === 0) return group;
+
+    const cacheKey = rowIds.slice().sort().join(",");
+    if (variantCache.current[cacheKey]) {
+      return { ...group, variants: variantCache.current[cacheKey] };
     }
-    if (filters.floors.length > 0 || filters.racks.length > 0 || filters.cols.length > 0) {
-      const loc = parseShelf(book.shelf);
-      if (!loc) return false;
-      if (filters.floors.length > 0 && !filters.floors.includes(loc.floorLabel)) return false;
-      if (filters.racks.length  > 0 && !filters.racks.includes(loc.rack))        return false;
-      if (filters.cols.length   > 0 && !filters.cols.includes(loc.col))          return false;
-    }
-    return true;
-  });
 
-  // ─── Pagination ───────────────────────────────────────────────────────────
-  const totalPages = Math.max(1, Math.ceil(filteredGroups.length / PAGE_SIZE));
-  const safePage   = Math.min(page, totalPages);
-  const pageGroups = filteredGroups.slice((safePage - 1) * PAGE_SIZE, safePage * PAGE_SIZE);
+    const numericIds = rowIds.map(Number).filter((n) => !isNaN(n));
+    const { data, error: e } = await supabase
+      .from("books")
+      .select("*")
+      .in("id", numericIds);
 
-  // ─── Facets ───────────────────────────────────────────────────────────────
-  const facets: Facets = {
-    subjects:   [...new Set(allGroups.map((b) => b.subject).filter(Boolean)    as string[])].sort(),
-    authors:    [...new Set(allGroups.map((b) => b.author).filter(Boolean)     as string[])].sort(),
-    publishers: [...new Set(allGroups.map((b) => b.publisher).filter(Boolean)  as string[])].sort(),
-    itemTypes:  [...new Set(allGroups.flatMap((b) => b.variants.map((v) => v.item_type)).filter(Boolean) as string[])].sort(),
-    floors: [], racks: [], cols: [],
-  };
-  allGroups.forEach((b) => {
-    const loc = parseShelf(b.shelf);
-    if (!loc) return;
-    if (!facets.floors.includes(loc.floorLabel)) facets.floors.push(loc.floorLabel);
-    if (!facets.racks.includes(loc.rack))        facets.racks.push(loc.rack);
-    if (!facets.cols.includes(loc.col))          facets.cols.push(loc.col);
-  });
-  facets.floors.sort();
-  facets.racks.sort((a, b) => a - b);
-  facets.cols.sort((a, b) => a - b);
+    if (e || !data) return group;
 
-  // ─── Filter toggle ────────────────────────────────────────────────────────
+    const variants = groupBooksByTitle(data as BookRow[])[0]?.variants ?? (data as BookRow[]);
+    variantCache.current[cacheKey] = variants;
+    return { ...group, variants };
+  }, []);
+
+  // ─── Filter toggle ───────────────────────────────────────────────────────
   const handleFilterChange = (category: keyof FilterState, value: unknown) => {
-    if (category === 'availableOnly') {
+    if (category === "availableOnly") {
       setFilters((prev) => ({ ...prev, availableOnly: value as boolean }));
       return;
     }
@@ -219,17 +327,20 @@ export function useBooks(initialQuery = '', initialField = 'Keyword') {
     });
   };
 
+  const totalPages = Math.max(1, Math.ceil(totalResults / PAGE_SIZE));
+
   return {
-    groups: pageGroups,
-    filteredGroups,
+    groups,
     loading, error,
-    page: safePage, totalPages,
-    totalResults: filteredGroups.length,
+    page,    totalPages, totalResults,
     setPage,
-    facets, filters, setFilters,
+    facets,  filters,    setFilters,
     handleFilterChange,
     clearFilters: () => setFilters(DEFAULT_FILTERS),
     searchTerm,   setSearchTerm,
     searchField,  setSearchField,
+    loadVariants,
+    // Expose the filtered groups count (= totalResults when using TS)
+    filteredGroups: groups,
   };
 }

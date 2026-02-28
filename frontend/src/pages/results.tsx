@@ -1,21 +1,22 @@
-// src/pages/results.tsx
-import { useState, useEffect } from 'react';
-import { Link, useSearchParams } from 'react-router-dom';
+// src/pages/results.tsx  — Typesense-powered
+import { useState, useEffect, useCallback } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import {
   Search, Settings, BookOpen, ChevronLeft, ChevronRight, SlidersHorizontal,
-} from 'lucide-react';
-import { useBooks } from '../hooks/useBooks';
-import BookList from '../components/BookList';
-import BookDetail from '../components/BookDetail';
-import FilterSidebar from '../components/FilterSidebar';
-import type { BookGroup } from '../types/book';
+  Zap,
+} from "lucide-react";
+import { useBooks } from "../hooks/useBooks";
+import BookList from "../components/BookList";
+import BookDetail from "../components/BookDetail";
+import FilterSidebar from "../components/FilterSidebar";
+import type { BookGroup } from "../types/book";
 
-const SEARCH_FIELDS = ['Keyword', 'Title', 'Author', 'Publisher', 'Subject', 'ISBN', 'Barcode'];
+const SEARCH_FIELDS = ["Keyword", "Title", "Author", "Publisher", "Subject", "ISBN"];
 
 export default function ResultsPage() {
   const [searchParams] = useSearchParams();
-  const initialQuery = searchParams.get('q') ?? '';
-  const initialField = searchParams.get('field') ?? 'Keyword';
+  const initialQuery = searchParams.get("q") ?? "";
+  const initialField = searchParams.get("field") ?? "Keyword";
 
   const {
     groups, loading, error,
@@ -23,16 +24,29 @@ export default function ResultsPage() {
     facets, filters, handleFilterChange, clearFilters,
     searchTerm, setSearchTerm,
     searchField, setSearchField,
+    loadVariants,
   } = useBooks(initialQuery, initialField);
 
   const [selectedBook,      setSelectedBook]      = useState<BookGroup | null>(null);
+  const [loadingDetail,     setLoadingDetail]      = useState(false);
   const [showMobileFilters, setShowMobileFilters] = useState(false);
 
-  // Sync URL params → hook when user navigates back/forward
+  // Sync URL params on back/forward
   useEffect(() => {
-    setSearchTerm(searchParams.get('q') ?? '');
-    setSearchField(searchParams.get('field') ?? 'Keyword');
+    setSearchTerm(searchParams.get("q") ?? "");
+    setSearchField(searchParams.get("field") ?? "Keyword");
   }, [searchParams]); // eslint-disable-line
+
+  // Click a book → lazy-load its physical copies from Supabase
+  const handleBookClick = useCallback(
+    async (group: BookGroup) => {
+      setLoadingDetail(true);
+      const full = await loadVariants(group);
+      setSelectedBook(full);
+      setLoadingDetail(false);
+    },
+    [loadVariants]
+  );
 
   return (
     <div className="min-h-screen bg-[#f8f9fa] font-sans text-gray-900 pb-12">
@@ -67,14 +81,13 @@ export default function ResultsPage() {
               type="text"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              placeholder="Search books, authors, subjects..."
+              placeholder='Search… try "machine learning" or computing -java'
               className="w-full bg-transparent border-none pl-2 pr-4 py-2 text-sm outline-none"
             />
-            {/* Clear button */}
             {searchTerm && (
               <button
                 type="button"
-                onClick={() => setSearchTerm('')}
+                onClick={() => setSearchTerm("")}
                 className="pr-3 text-gray-400 hover:text-gray-700 text-lg leading-none"
               >
                 ×
@@ -114,13 +127,20 @@ export default function ResultsPage() {
           )}
         </div>
 
+        {/* Detail loading overlay */}
+        {loadingDetail && (
+          <div className="fixed inset-0 bg-white/60 backdrop-blur-sm z-50 flex items-center justify-center">
+            <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600" />
+          </div>
+        )}
+
         {selectedBook ? (
           <BookDetail bookGroup={selectedBook} onBack={() => setSelectedBook(null)} />
         ) : (
           <div className="flex gap-8">
 
             {/* Sidebar */}
-            <aside className={`w-64 flex-shrink-0 sticky top-24 h-[calc(100vh-8rem)] overflow-y-auto ${showMobileFilters ? 'block' : 'hidden md:block'}`}>
+            <aside className={`w-64 flex-shrink-0 sticky top-24 h-[calc(100vh-8rem)] overflow-y-auto ${showMobileFilters ? "block" : "hidden md:block"}`}>
               <FilterSidebar
                 facets={facets}
                 selectedFilters={filters}
@@ -132,21 +152,23 @@ export default function ResultsPage() {
             {/* Results */}
             <main className="flex-1 min-w-0">
 
-              {/* Result count + page */}
               <div className="flex justify-between items-end mb-5">
                 <div>
                   <h2 className="text-xl font-bold text-gray-900">Library Catalog</h2>
-                  <p className="text-gray-500 text-sm mt-0.5">
+                  <p className="text-gray-500 text-sm mt-0.5 flex items-center gap-1.5">
                     {loading ? (
                       <span className="animate-pulse">Searching…</span>
                     ) : searchTerm ? (
                       <>
                         <span className="font-medium text-gray-700">{totalResults.toLocaleString()}</span>
-                        {' '}result{totalResults !== 1 ? 's' : ''} for{' '}
+                        {" "}result{totalResults !== 1 ? "s" : ""} for{" "}
                         <span className="font-semibold text-blue-600">"{searchTerm}"</span>
+                        <span className="inline-flex items-center gap-0.5 text-[10px] bg-blue-50 text-blue-500 border border-blue-100 px-1.5 py-0.5 rounded-full font-medium ml-1">
+                          <Zap className="w-2.5 h-2.5" /> Typesense
+                        </span>
                       </>
                     ) : (
-                      'Enter a search term to begin'
+                      "Enter a search term to begin"
                     )}
                   </p>
                 </div>
@@ -157,23 +179,29 @@ export default function ResultsPage() {
                 )}
               </div>
 
-              {/* Error */}
               {error && (
                 <div className="bg-red-50 border border-red-200 text-red-700 rounded-xl p-4 mb-5 text-sm">
                   ⚠ {error}
+                  {error.includes("ECONNREFUSED") && (
+                    <p className="mt-1 text-red-500">
+                      Typesense is not running. Start it with{" "}
+                      <code className="bg-red-100 px-1 rounded">docker compose up -d typesense</code>
+                    </p>
+                  )}
                 </div>
               )}
 
-              {/* Empty state — no search yet */}
               {!loading && !searchTerm && (
                 <div className="text-center py-24 text-gray-400">
                   <div className="text-5xl mb-4">🔍</div>
-                  <p className="text-lg font-medium text-gray-500">Start typing to search 105,000+ titles</p>
-                  <p className="text-sm mt-1">Try a title, author name, or subject area</p>
+                  <p className="text-lg font-medium text-gray-500">Start typing to search 300,000+ books</p>
+                  <p className="text-sm mt-1">
+                    Supports typos, quotes <code className="bg-gray-100 px-1 rounded">"exact phrase"</code>, and
+                    exclusions <code className="bg-gray-100 px-1 rounded">python -django</code>
+                  </p>
                 </div>
               )}
 
-              {/* Loading */}
               {loading && (
                 <div className="flex flex-col items-center justify-center py-20 space-y-4">
                   <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600" />
@@ -181,16 +209,14 @@ export default function ResultsPage() {
                 </div>
               )}
 
-              {/* Results — pass searchTerm for highlighting */}
               {!loading && searchTerm && (
                 <BookList
                   books={groups}
-                  onBookClick={setSelectedBook}
-                  searchQuery={searchTerm}   // ← this drives highlighting
+                  onBookClick={handleBookClick}
+                  searchQuery={searchTerm}
                 />
               )}
 
-              {/* Pagination */}
               {!loading && groups.length > 0 && (
                 <div className="mt-8 flex justify-center gap-3">
                   <button

@@ -1,0 +1,13 @@
+
+
+services:
+  typesense:
+    image: typesense/typesense:26.0
+    container_name: library_typesense
+    restart: on-failure
+    ports:
+      - "8108:8108"
+    volumes:
+      - ./typesense-data:/data
+    # We set a local development API key 'xyz' and enable CORS so your React frontend can talk to it
+    command: '--data-dir /data --api-key=xyz --enable-cors=true'
